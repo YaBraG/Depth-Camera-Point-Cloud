@@ -13,6 +13,11 @@ class RealSenseCamera:
         self.profile = None
         self.depth_scale_m = 0.001
         self.is_streaming = False
+        self.threshold_filter = None
+        self.spatial_filter = None
+        self.temporal_filter = None
+        self.hole_filling_filter = None
+        self.filter_warning = ""
 
     def _import_realsense(self):
         if self.rs is not None:
@@ -55,6 +60,7 @@ class RealSenseCamera:
         depth_sensor = self.profile.get_device().first_depth_sensor()
         self.depth_scale_m = float(depth_sensor.get_depth_scale())
         self.align = rs.align(rs.stream.color)
+        self._setup_depth_filters()
         self.is_streaming = True
 
     def stop(self) -> None:
@@ -66,7 +72,90 @@ class RealSenseCamera:
         self.pipeline = None
         self.align = None
         self.profile = None
+        self.threshold_filter = None
+        self.spatial_filter = None
+        self.temporal_filter = None
+        self.hole_filling_filter = None
         self.is_streaming = False
+
+    def _setup_depth_filters(self) -> None:
+        self.filter_warning = ""
+        self.threshold_filter = None
+        self.spatial_filter = None
+        self.temporal_filter = None
+        self.hole_filling_filter = None
+        if not config.ENABLE_DEPTH_FILTERS:
+            return
+
+        rs = self._import_realsense()
+        warnings = []
+        try:
+            self.threshold_filter = rs.threshold_filter()
+            self._safe_set_filter_option(self.threshold_filter, rs.option.min_distance, config.MIN_DEPTH_M)
+            self._safe_set_filter_option(self.threshold_filter, rs.option.max_distance, config.MAX_DEPTH_M)
+        except Exception as exc:
+            warnings.append(f"threshold filter setup failed: {exc}")
+            self.threshold_filter = None
+
+        try:
+            self.spatial_filter = rs.spatial_filter()
+            self._safe_set_filter_option(self.spatial_filter, rs.option.filter_magnitude, config.SPATIAL_FILTER_MAGNITUDE)
+            self._safe_set_filter_option(self.spatial_filter, rs.option.filter_smooth_alpha, config.SPATIAL_FILTER_SMOOTH_ALPHA)
+            self._safe_set_filter_option(self.spatial_filter, rs.option.filter_smooth_delta, config.SPATIAL_FILTER_SMOOTH_DELTA)
+        except Exception as exc:
+            warnings.append(f"spatial filter setup failed: {exc}")
+            self.spatial_filter = None
+
+        try:
+            self.temporal_filter = rs.temporal_filter()
+            self._safe_set_filter_option(self.temporal_filter, rs.option.filter_smooth_alpha, config.TEMPORAL_FILTER_SMOOTH_ALPHA)
+            self._safe_set_filter_option(self.temporal_filter, rs.option.filter_smooth_delta, config.TEMPORAL_FILTER_SMOOTH_DELTA)
+        except Exception as exc:
+            warnings.append(f"temporal filter setup failed: {exc}")
+            self.temporal_filter = None
+
+        try:
+            self.hole_filling_filter = rs.hole_filling_filter()
+            self._safe_set_filter_option(self.hole_filling_filter, rs.option.holes_fill, config.HOLE_FILLING_MODE)
+        except Exception as exc:
+            warnings.append(f"hole filling filter setup failed: {exc}")
+            self.hole_filling_filter = None
+
+        option_warnings = [self.filter_warning] if self.filter_warning else []
+        self.filter_warning = "; ".join(option_warnings + warnings)
+
+    def _safe_set_filter_option(self, filter_obj, option, value) -> None:
+        try:
+            if filter_obj.supports(option):
+                filter_obj.set_option(option, float(value))
+        except Exception as exc:
+            message = f"filter option warning: {exc}"
+            self.filter_warning = f"{self.filter_warning}; {message}" if self.filter_warning else message
+
+    def _apply_depth_filters(self, depth_frame):
+        if not config.ENABLE_DEPTH_FILTERS:
+            return depth_frame
+
+        filtered_depth_frame = depth_frame
+        warnings = []
+        filter_steps = [
+            (config.ENABLE_THRESHOLD_FILTER, self.threshold_filter, "threshold"),
+            (config.ENABLE_SPATIAL_FILTER, self.spatial_filter, "spatial"),
+            (config.ENABLE_TEMPORAL_FILTER, self.temporal_filter, "temporal"),
+            (config.ENABLE_HOLE_FILLING_FILTER, self.hole_filling_filter, "hole filling"),
+        ]
+        for enabled, filter_obj, name in filter_steps:
+            if not enabled or filter_obj is None:
+                continue
+            try:
+                filtered_depth_frame = filter_obj.process(filtered_depth_frame)
+            except Exception as exc:
+                warnings.append(f"{name} filter failed: {exc}")
+
+        if warnings:
+            existing_warning = [self.filter_warning] if self.filter_warning else []
+            self.filter_warning = "; ".join(existing_warning + warnings)
+        return filtered_depth_frame
 
     def get_aligned_frames(self):
         if not self.is_streaming:
@@ -85,16 +174,23 @@ class RealSenseCamera:
         if not depth_frame or not color_frame:
             return None
 
-        depth_image_raw = np.asanyarray(depth_frame.get_data())
+        filtered_depth_frame = self._apply_depth_filters(depth_frame)
+        depth_image_raw = np.asanyarray(filtered_depth_frame.get_data())
         color_image_bgr = np.asanyarray(color_frame.get_data())
         depth_image_m = depth_image_raw.astype(np.float32) * self.depth_scale_m
-        intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
+        try:
+            intrinsics = filtered_depth_frame.profile.as_video_stream_profile().intrinsics
+        except Exception:
+            intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
+        depth_stats = compute_depth_stats(depth_image_m)
 
         return {
             "depth_image_m": depth_image_m,
             "depth_image_raw": depth_image_raw,
             "color_image_bgr": color_image_bgr,
             "intrinsics": intrinsics,
+            "filter_warning": self.filter_warning,
+            "depth_stats": depth_stats,
         }
 
     def _demo_frames(self):
@@ -120,4 +216,29 @@ class RealSenseCamera:
             "depth_image_raw": (depth_image_m / self.depth_scale_m).astype(np.uint16),
             "color_image_bgr": color_image_bgr,
             "intrinsics": DemoIntrinsics(),
+            "filter_warning": "",
+            "depth_stats": compute_depth_stats(depth_image_m),
         }
+
+
+def compute_depth_stats(depth_image_m):
+    valid_depth_mask = np.isfinite(depth_image_m)
+    valid_depth_mask &= depth_image_m >= config.MIN_DEPTH_M
+    valid_depth_mask &= depth_image_m <= config.MAX_DEPTH_M
+    valid_depth_values_m = depth_image_m[valid_depth_mask]
+    valid_count = int(valid_depth_values_m.size)
+
+    if valid_count == 0:
+        return {
+            "valid_count": 0,
+            "depth_min_m": None,
+            "depth_median_m": None,
+            "depth_max_m": None,
+        }
+
+    return {
+        "valid_count": valid_count,
+        "depth_min_m": float(np.min(valid_depth_values_m)),
+        "depth_median_m": float(np.median(valid_depth_values_m)),
+        "depth_max_m": float(np.max(valid_depth_values_m)),
+    }

@@ -14,6 +14,27 @@ The Intel RealSense D435 is an RGB-D stereo depth camera. It estimates depth fro
 
 This project is a simple point-cloud mapper, not full SLAM. By default, accumulated frames are added in the same camera frame. Optional ICP can be enabled in `src/config.py`, but it is off by default.
 
+## Latest Improvement Pass
+
+This version adds:
+
+- RealSense depth post-processing filters: threshold, spatial, temporal, and hole filling.
+- 2D RGB/depth preview orientation correction through `DISPLAY_*` settings.
+- Open3D point cloud visualization flips through `POINTCLOUD_VISUAL_*` settings.
+- Depth diagnostics in the Tkinter status area.
+
+The RGB/depth preview rotation and mirror settings are display-only. They affect only `cv2.imshow()` windows.
+
+The point cloud flip settings are visualization-only. The normal pinhole RGB-D projection math is still used first:
+
+```text
+x_camera_m = (u_pixel - cx) * z_depth_m / fx
+y_camera_m = (v_pixel - cy) * z_depth_m / fy
+z_camera_m = z_depth_m
+```
+
+For ROS 2 later, publish mathematically correct camera-frame points or use a proper TF transform. Do not treat quick display flips as a real robot coordinate transform.
+
 ## Install
 
 Double-click `install.bat`, or run:
@@ -88,9 +109,77 @@ py -3.12 -m pip install open3d
 
 Also make sure your graphics drivers are current.
 
+### Point Cloud Is Mirrored Or Upside Down
+
+Try changing these settings in `src/config.py`:
+
+```python
+POINTCLOUD_VISUAL_FLIP_X = True
+POINTCLOUD_VISUAL_FLIP_Y = True
+POINTCLOUD_VISUAL_FLIP_Z = False
+```
+
+Usually for this setup, start with X and Y flipped, Z not flipped.
+
+### RGB Or Depth Preview Is Upside Down
+
+Try:
+
+```python
+DISPLAY_ROTATE_180 = True
+```
+
+This changes only the 2D preview windows, not the point cloud math.
+
+### RGB Or Depth Preview Is Mirrored
+
+Try:
+
+```python
+DISPLAY_MIRROR_HORIZONTAL = True
+```
+
+This also changes only the 2D preview windows.
+
+### Close Objects Disappear
+
+Use:
+
+```python
+MIN_DEPTH_M = 0.20
+```
+
+or:
+
+```python
+MIN_DEPTH_M = 0.25
+```
+
+For first tests, keep objects about 0.5 m to 1.5 m from the camera.
+
+### Depth Looks Stretched, Zoomed, Or Noisy
+
+- Use non-shiny objects.
+- Avoid glass, mirrors, and black glossy plastic.
+- Use better lighting.
+- Keep the camera still.
+- Keep depth filters enabled with `ENABLE_DEPTH_FILTERS = True`.
+- Watch the valid depth pixel count in the app status area.
+
 ### App Freezes
 
 Use **Stop Stream** or press `q`/`ESC`. The app uses Tkinter `.after()` updates instead of long blocking loops, but slow machines may need a larger `POINT_STRIDE` or `VOXEL_SIZE_M` in `src/config.py`.
+
+## Good First Test
+
+Use a cardboard box, chair, or wall corner about 0.5 m to 1.5 m away.
+
+Start with:
+
+- Auto mapping off.
+- **Show Live Point Cloud** only.
+- Keep the camera still.
+- Confirm the depth diagnostics show a healthy valid pixel count.
 
 ## ROS 2 Migration Plan
 

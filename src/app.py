@@ -23,7 +23,7 @@ class RealSenseMapperApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("RealSense D435 3D Mapper")
-        self.root.geometry("520x560")
+        self.root.geometry("620x720")
 
         self.camera = RealSenseCamera()
         self.map_builder = MapBuilder()
@@ -31,13 +31,15 @@ class RealSenseMapperApp:
 
         self.mode = self.MODE_IDLE
         self.streaming = False
-        self.auto_mapping = False
+        self.auto_mapping = config.AUTO_MAPPING_DEFAULT
         self.frame_counter = 0
 
         self.current_point_cloud = None
         self.current_point_count = 0
         self.last_saved_path = ""
         self.last_error = ""
+        self.latest_depth_stats = None
+        self.latest_filter_warning = ""
 
         self._cv2 = None
         self._build_ui()
@@ -92,6 +94,11 @@ class RealSenseMapperApp:
             "auto": tk.StringVar(value="Auto mapping: off"),
             "current_points": tk.StringVar(value="Current point cloud: 0 points"),
             "map_points": tk.StringVar(value="Accumulated map: 0 points"),
+            "valid_depth": tk.StringVar(value="Valid depth pixels: none yet"),
+            "depth_range": tk.StringVar(value="Depth min/median/max: none yet"),
+            "filter_warning": tk.StringVar(value="Filter warning: none"),
+            "display_orientation": tk.StringVar(value="Display orientation: pending"),
+            "pointcloud_flips": tk.StringVar(value="Point cloud visual flips: pending"),
             "saved": tk.StringVar(value="Last saved file: none"),
             "message": tk.StringVar(value="Ready"),
         }
@@ -172,6 +179,7 @@ class RealSenseMapperApp:
                 return
 
             self.frame_counter += 1
+            self._update_depth_status(frames)
             if self.mode in (self.MODE_RGB, self.MODE_DEPTH, self.MODE_ALIGNED):
                 self._show_cv_preview(frames)
 
@@ -198,16 +206,29 @@ class RealSenseMapperApp:
         depth_image_m = frames["depth_image_m"]
 
         if self.mode == self.MODE_RGB:
-            cv2.imshow("RGB Stream - press q or ESC to stop", color_image_bgr)
+            color_preview = self._apply_display_orientation(color_image_bgr)
+            cv2.imshow("RGB Stream - press q or ESC to stop", color_preview)
             return
 
-        depth_preview = self._make_depth_preview(depth_image_m)
+        depth_preview = self._apply_display_orientation(self._make_depth_preview(depth_image_m))
         if self.mode == self.MODE_DEPTH:
             cv2.imshow("Depth Stream - press q or ESC to stop", depth_preview)
             return
 
-        aligned_preview = np.hstack((color_image_bgr, depth_preview))
+        color_preview = self._apply_display_orientation(color_image_bgr)
+        aligned_preview = np.hstack((color_preview, depth_preview))
         cv2.imshow("Aligned RGB-D - press q or ESC to stop", aligned_preview)
+
+    def _apply_display_orientation(self, image: np.ndarray) -> np.ndarray:
+        cv2 = self._import_cv2()
+        display_image = image
+        if config.DISPLAY_ROTATE_180:
+            display_image = cv2.rotate(display_image, cv2.ROTATE_180)
+        if config.DISPLAY_MIRROR_HORIZONTAL:
+            display_image = cv2.flip(display_image, 1)
+        if config.DISPLAY_MIRROR_VERTICAL:
+            display_image = cv2.flip(display_image, 0)
+        return display_image
 
     def _make_depth_preview(self, depth_image_m: np.ndarray) -> np.ndarray:
         cv2 = self._import_cv2()
@@ -261,7 +282,10 @@ class RealSenseMapperApp:
     def toggle_auto_mapping(self) -> None:
         self.auto_mapping = not self.auto_mapping
         state = "on" if self.auto_mapping else "off"
-        self._set_message(f"Auto mapping turned {state}")
+        self._set_message(
+            f"Auto mapping turned {state}. Warning: auto mapping is not SLAM. "
+            "With ICP off, frames are stacked without pose tracking. Keep the camera still."
+        )
 
     def save_current_point_cloud(self) -> None:
         try:
@@ -337,10 +361,51 @@ class RealSenseMapperApp:
         self.status_vars["message"].set(self.last_error)
         self._refresh_status()
 
+    def _update_depth_status(self, frames) -> None:
+        self.latest_depth_stats = frames.get("depth_stats")
+        self.latest_filter_warning = frames.get("filter_warning") or ""
+        if not config.SHOW_DEPTH_DIAGNOSTICS or not self.latest_depth_stats:
+            return
+
+        valid_count = self.latest_depth_stats.get("valid_count", 0)
+        if valid_count < config.VERY_LOW_VALID_DEPTH_PIXEL_COUNT:
+            self._set_message(
+                "Warning: very few valid depth pixels. Try more distance, better lighting, "
+                "non-shiny surfaces, and USB 3."
+            )
+
     def _refresh_status(self) -> None:
         self.status_vars["mode"].set(f"Current mode: {self.mode}")
         self.status_vars["streaming"].set(f"Streaming: {'yes' if self.streaming else 'no'}")
         self.status_vars["auto"].set(f"Auto mapping: {'on' if self.auto_mapping else 'off'}")
         self.status_vars["current_points"].set(f"Current point cloud: {self.current_point_count} points")
         self.status_vars["map_points"].set(f"Accumulated map: {self.map_builder.point_count()} points")
+        if self.latest_depth_stats:
+            valid_count = self.latest_depth_stats.get("valid_count", 0)
+            depth_min_m = self.latest_depth_stats.get("depth_min_m")
+            depth_median_m = self.latest_depth_stats.get("depth_median_m")
+            depth_max_m = self.latest_depth_stats.get("depth_max_m")
+            self.status_vars["valid_depth"].set(f"Valid depth pixels: {valid_count}")
+            if depth_min_m is None:
+                self.status_vars["depth_range"].set("Depth min/median/max: none")
+            else:
+                self.status_vars["depth_range"].set(
+                    f"Depth min/median/max: {depth_min_m:.3f} / {depth_median_m:.3f} / {depth_max_m:.3f} m"
+                )
+        else:
+            self.status_vars["valid_depth"].set("Valid depth pixels: none yet")
+            self.status_vars["depth_range"].set("Depth min/median/max: none yet")
+        self.status_vars["filter_warning"].set(f"Filter warning: {self.latest_filter_warning or 'none'}")
+        self.status_vars["display_orientation"].set(
+            "Display orientation: "
+            f"rotate 180={config.DISPLAY_ROTATE_180}, "
+            f"mirror H={config.DISPLAY_MIRROR_HORIZONTAL}, "
+            f"mirror V={config.DISPLAY_MIRROR_VERTICAL}"
+        )
+        self.status_vars["pointcloud_flips"].set(
+            "Point cloud visual flips: "
+            f"flip X={config.POINTCLOUD_VISUAL_FLIP_X}, "
+            f"flip Y={config.POINTCLOUD_VISUAL_FLIP_Y}, "
+            f"flip Z={config.POINTCLOUD_VISUAL_FLIP_Z}"
+        )
         self.status_vars["saved"].set(f"Last saved file: {self.last_saved_path or 'none'}")

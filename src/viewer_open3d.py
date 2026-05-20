@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from . import config
+
 
 class Open3DLiveViewer:
     def __init__(self, window_name: str = "Live RealSense Point Cloud") -> None:
@@ -7,7 +9,9 @@ class Open3DLiveViewer:
         self.o3d = None
         self.visualizer = None
         self.display_cloud = None
+        self.coordinate_frame = None
         self.geometry_added = False
+        self.coordinate_frame_added = False
         self.is_open = False
 
     def _import_open3d(self):
@@ -27,6 +31,13 @@ class Open3DLiveViewer:
         self.visualizer = o3d.visualization.Visualizer()
         self.visualizer.create_window(window_name=self.window_name, width=960, height=720)
         self.display_cloud = o3d.geometry.PointCloud()
+        self.coordinate_frame = None
+        self.coordinate_frame_added = False
+        if config.SHOW_COORDINATE_FRAME:
+            # Open3D axis colors: red = x axis, green = y axis, blue = z axis.
+            self.coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+                size=config.COORDINATE_FRAME_SIZE_M
+            )
         self.geometry_added = False
         self.is_open = True
 
@@ -43,6 +54,9 @@ class Open3DLiveViewer:
             self.display_cloud.colors = point_cloud.colors
             if not self.geometry_added:
                 self.visualizer.add_geometry(self.display_cloud)
+                if self.coordinate_frame is not None and not self.coordinate_frame_added:
+                    self.visualizer.add_geometry(self.coordinate_frame, reset_bounding_box=False)
+                    self.coordinate_frame_added = True
                 self.geometry_added = True
             else:
                 self.visualizer.update_geometry(self.display_cloud)
@@ -64,5 +78,7 @@ class Open3DLiveViewer:
                 pass
         self.visualizer = None
         self.display_cloud = None
+        self.coordinate_frame = None
         self.geometry_added = False
+        self.coordinate_frame_added = False
         self.is_open = False

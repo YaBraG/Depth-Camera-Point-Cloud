@@ -55,13 +55,32 @@ def create_point_cloud_from_rgbd(depth_image_m: np.ndarray, color_image_bgr: np.
 
     points_camera_m = np.column_stack((x_camera_m, y_camera_m, z_camera_m)).astype(np.float64)
 
+    # RealSense camera frame:
+    # x = right
+    # y = down
+    # z = forward
+    #
+    # Open3D visualization may look upside-down or mirrored depending on camera mounting.
+    # The POINTCLOUD_VISUAL_FLIP_* config values allow quick correction without changing projection math.
+    #
+    # RealSense camera frame projection math is unchanged.
+    # These flips are only for Open3D visualization so the scene appears upright/not mirrored.
+    # For ROS 2 later, we should publish the mathematically correct camera-frame points or use a proper TF transform.
+    points_visual_m = points_camera_m.copy()
+    if config.POINTCLOUD_VISUAL_FLIP_X:
+        points_visual_m[:, 0] *= -1.0
+    if config.POINTCLOUD_VISUAL_FLIP_Y:
+        points_visual_m[:, 1] *= -1.0
+    if config.POINTCLOUD_VISUAL_FLIP_Z:
+        points_visual_m[:, 2] *= -1.0
+
     colors_rgb = None
     if color_image_bgr is not None:
         sampled_color_bgr = color_image_bgr[0:image_height:stride, 0:image_width:stride]
         colors_bgr = sampled_color_bgr[valid_depth_mask].astype(np.float64) / 255.0
         colors_rgb = colors_bgr[:, ::-1]
 
-    return points_camera_m, colors_rgb
+    return points_visual_m, colors_rgb
 
 
 def numpy_to_open3d_point_cloud(points_camera_m: np.ndarray, colors_rgb: np.ndarray | None = None):
