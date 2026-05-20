@@ -35,7 +35,7 @@ HOLE_FILLING_MODE = 1
 
 # 2D preview display correction only.
 # These affect cv2.imshow previews only, not the raw depth math.
-DISPLAY_ROTATE_180 = True
+DISPLAY_ROTATE_180 = False
 DISPLAY_MIRROR_HORIZONTAL = False
 DISPLAY_MIRROR_VERTICAL = False
 
